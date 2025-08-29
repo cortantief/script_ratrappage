@@ -8,7 +8,6 @@ conf.verb = 0   # turn off global verbosity
 
 
 def valid_file(path: str) -> str:
-
     if not os.path.exists(path):
         raise argparse.ArgumentTypeError(f"File '{path}' does not exist.")
     if not os.path.isfile(path):
@@ -35,9 +34,9 @@ for file in args.files:
     file_id = random.randint(1, 0xffff)
     filename_str = os.path.basename(file)
    
-    packet = PACKET_BASE/(proto.build_nw_file(sess_id,file_id, os.path.basename(file).encode()))
+    packet = PACKET_BASE/(proto.build_nw_file(sess_id, file_id, os.path.basename(file).encode()))
     send(packet)
-    for data in proto.build_sfd_file(sess_id,file_id, file):
+    for data in proto.build_sfd_file(sess_id, file_id, file):
         packet  = PACKET_BASE/data
         send(packet)
     packet = PACKET_BASE/proto.build_eof(sess_id, file_id)

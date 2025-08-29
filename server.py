@@ -203,4 +203,5 @@ parser.add_argument("--interface", "-i", choices=get_if_list(), required=True)
 
 if __name__ == "__main__":
     args = parser.parse_args()
+    icmp_responder(args.interface)
     

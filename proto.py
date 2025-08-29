@@ -1,4 +1,4 @@
-import struct, os
+import struct
 from enum import Enum
 
 MAGIC = b"SH"
