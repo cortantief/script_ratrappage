@@ -9,6 +9,8 @@ import argparse
 
 console = Console()
 
+# Palette de couleurs par type de trame pour l’affichage
+
 FLAG_STYLES = {
     MiniProtoFlag.NEW_SESSION:   ("NEW_SESSION", "blue"),
     MiniProtoFlag.CLOSE_SESSION: ("CLOSE_SESSION", "red"),
@@ -18,6 +20,7 @@ FLAG_STYLES = {
 }
 
 def _preview_hex(b: bytes, max_bytes: int = 32) -> str:
+    """Retourne un aperçu hex tronqué pour log."""
     if not b:
         return "—"
     h = b[:max_bytes].hex()
@@ -25,6 +28,15 @@ def _preview_hex(b: bytes, max_bytes: int = 32) -> str:
 
 
 def parse_proto(payload: bytes):
+    """
+    Décode un payload MiniProto et renvoie (flag_enum, info_dict).
+    Effectue des contrôles de longueur à chaque étape.
+    """
+
+    # Check si la taille du payload correspond au plus petit
+    # dénominateur commun dans le flag. Si trop petit pour un header
+    # ce n'est pas un payload de MiniProto
+    # En-tête minimal : MAGIC (2) | VERSION (1) | FLAG (1)
     if len(payload) < struct.calcsize(MIN_BASE):
         raise ValueError("payload too short")
 
@@ -39,13 +51,15 @@ def parse_proto(payload: bytes):
     except ValueError:
         raise ValueError(f"unknown flag {flag}")
 
+    # NEW_SESSION / CLOSE_SESSION : header commun + sess_id (2 octets après)
     if flag_enum in (MiniProtoFlag.NEW_SESSION, MiniProtoFlag.CLOSE_SESSION):
         need = struct.calcsize(SESS_HDR_FMT) + 2
         if len(payload) < need:
             raise ValueError("session frame too short")
         sess_id = int.from_bytes(payload[4:6], "big")
         return flag_enum, {"sess_id": sess_id}
-
+    
+    # NEW_FILE : header + champs sess_id/file_id/name_len + bytes du filename
     elif flag_enum == MiniProtoFlag.NEW_FILE:
         need = struct.calcsize(NF_HDR_FMT)
         if len(payload) < need:
@@ -61,7 +75,8 @@ def parse_proto(payload: bytes):
             "name_len": name_len,
             "filename": filename,
         }
-
+    
+    # SEND_DATA : header + data (len=data_len)
     elif flag_enum == MiniProtoFlag.SEND_DATA:
         need = struct.calcsize(SFD_HDR_FMT)
         if len(payload) < need:
@@ -78,7 +93,8 @@ def parse_proto(payload: bytes):
             "data_len": data_len,
             "data": data,
         }
-
+    
+    # EOF : fin de fichier 
     elif flag_enum == MiniProtoFlag.EOF:
         need = struct.calcsize(EOF_HDR_FMT)
         if len(payload) < need:
@@ -91,6 +107,10 @@ def parse_proto(payload: bytes):
 
 
 class SessionStore:
+    """
+    Stocke l'état par session et recompose les fichiers.
+    Structure: sessions[sess_id][file_id] = (filename, [(seq, data), ...])
+    """
     def __init__(self):
         self.sessions = {}
     
@@ -102,6 +122,7 @@ class SessionStore:
         d[file_id] = (filename, [])
     
     def eof(self, sess_id: int, file_id: int):
+        """Trie par seq et écrit le fichier quand EOF est reçu."""
         sess = self.sessions.get(sess_id)
         if not sess:
             return
@@ -116,6 +137,7 @@ class SessionStore:
         sess[file_id] = None
     
     def on_data(self, sess_id: int, file_id: int, seq: int, data: bytes ):
+        """Accumule les blocs (seq, data) en RAM ; l'écriture se fait à EOF."""
         sess = self.sessions.get(sess_id)
         if not sess:
             return
@@ -128,7 +150,13 @@ class SessionStore:
         self.sessions[sess_id] = None
 
 def icmp_responder(iface: str = None):
+    """
+    Boucle principale de capture et dispatch.
+    Filtre ICMP Echo Request
+    """
     session_store = SessionStore()
+
+    # Handlers qui manipulent le SessionStore en fonction des flag
     def on_new_session(info):   session_store.new_session(info['sess_id'])
     def on_close_session(info): session_store.close_session(info["sess_id"])
     def on_new_file(info):      session_store.new_file(info['sess_id'], info['file_id'], info['filename'])
@@ -143,6 +171,7 @@ def icmp_responder(iface: str = None):
         MiniProtoFlag.EOF:           on_eof,
     }
     def handle(pkt):
+        # Garde uniquement IP/ICMP Echo Request
         if IP in pkt and ICMP in pkt and pkt[ICMP].type == 8:
             src, dst = pkt[IP].src, pkt[IP].dst
             payload = pkt[Raw].load if Raw in pkt else b""
@@ -184,16 +213,21 @@ def icmp_responder(iface: str = None):
 
                 console.print(Panel(table, title=f"[bold]{label}[/]", border_style=color))
 
+                # Dispatch vers le handler de ce flag
+                # Par défaut retourne une fonction qui ne fait rien
+                # évitant ainsi les crashs
                 HANDLERS.get(flag, lambda _i: None)(info)
-
+            
+            # Catch erreur
             except Exception as e:
+
                 err = Table(box=box.MINIMAL_DOUBLE_HEAD, show_header=False, expand=True)
                 err.add_row("Reason", f"[red]{e}[/]")
                 err.add_row("Payload (hex)", _preview_hex(payload))
                 console.print(Panel(err, title="[bold red]MiniProto parse error[/]", border_style="red"))
 
 
-
+    # Filtre uniquement Echo Request dans le sniff
     lfilter = lambda p: IP in p and ICMP in p and getattr(p[ICMP], "type", None) == 8
     sniff(prn=handle, lfilter=lfilter, store=0, iface=iface)
 
